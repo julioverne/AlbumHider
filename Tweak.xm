@@ -6,6 +6,30 @@
 
 #define NSLog(...)
 
+static UIViewController *_topMostController(UIViewController *cont)
+{
+    UIViewController *topController = cont;
+    while (topController.presentedViewController) {
+        topController = topController.presentedViewController;
+    }
+    if ([topController isKindOfClass:[UINavigationController class]]) {
+        UIViewController *visible = ((UINavigationController *)topController).visibleViewController;
+        if (visible) {
+            topController = visible;
+        }
+    }
+    return (topController != cont ? topController : nil);
+}
+static UIViewController *topMostController()
+{
+    UIViewController *topController = [UIApplication sharedApplication].keyWindow.rootViewController;
+    UIViewController *next = nil;
+    while ((next = _topMostController(topController)) != nil) {
+        topController = next;
+    }
+    return topController;
+}
+
 @interface PXPhotoKitCollectionsDataSource : NSObject
 - (NSArray*)_collectionListBySection;
 @end
@@ -13,6 +37,7 @@
 @interface PHAssetCollection : NSObject
 @property (nonatomic,copy) NSString* localIdentifier;
 @property (nonatomic,readonly) NSString * localizedTitle;
+@property (nonatomic,readonly) NSString * localizedSubtitle;
 @end
 
 @interface PHCollectionList : NSObject
@@ -23,6 +48,15 @@
 @property (nonatomic,copy) PXPhotoKitCollectionsDataSource* dataSource;
 @end
 
+static NSMutableDictionary* knownAlbumDic()
+{
+	static NSMutableDictionary* knownAlbumIds;
+	if(!knownAlbumIds) {
+		knownAlbumIds = [[NSMutableDictionary alloc] init];
+	}
+	return knownAlbumIds;
+}
+
 static NSMutableArray* hiddenAlbumIds()
 {
 	static NSMutableArray* retHiddenAlbumIds;
@@ -31,7 +65,6 @@ static NSMutableArray* hiddenAlbumIds()
 	}
 	return retHiddenAlbumIds;
 }
-static BOOL tmpDisable;
 
 @interface AlbumHiderController : PSListController
 @property (nonatomic,assign) PXPhotoKitCollectionsDataSource* dataSource;
@@ -44,15 +77,17 @@ static BOOL tmpDisable;
 - (id)collections
 {
 	NSArray* ret = %orig;
-	if(ret&&!tmpDisable) {
+	if(ret) {
 		NSMutableArray* retMut = [NSMutableArray array];
 		for(PHAssetCollection* assetCol in ret) {
-			if(assetCol.localIdentifier!=nil && [hiddenAlbumIds() containsObject:assetCol.localIdentifier]) {
+
+			NSString* albumKey = [NSString stringWithFormat:@"%@|||%@", assetCol.localizedSubtitle, assetCol.localizedTitle];
+			[knownAlbumDic() setObject:assetCol forKey:albumKey];
+			
+			if([hiddenAlbumIds() containsObject:albumKey]) {
 				continue;
 			}
-			if(assetCol.localizedTitle!=nil && [hiddenAlbumIds() containsObject:assetCol.localizedTitle]) {
-				continue;
-			}
+			
 			[retMut addObject:assetCol];
 		}
 		return retMut;
@@ -100,8 +135,8 @@ static BOOL tmpDisable;
 {
 	@try {
 		AlbumHiderController* shrd = [AlbumHiderController sharedInstance];
-		shrd.dataSource = self.dataSource;
-		[self.navigationController pushViewController:shrd animated:YES];
+		UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:shrd];
+		[topMostController() presentViewController:nav animated:YES completion:nil];
 	} @catch (NSException * e) {
 	}
 }
@@ -113,7 +148,6 @@ static BOOL tmpDisable;
 
 
 @implementation AlbumHiderController
-@synthesize dataSource;
 + (id)sharedInstance
 {
 	static AlbumHiderController* AlbumHiderControllerC;
@@ -127,31 +161,23 @@ static BOOL tmpDisable;
 		NSMutableArray* specifiers = [NSMutableArray array];
 		PSSpecifier* spec;
 		
-		tmpDisable = YES;
-		for(PHCollectionList* collectionNow in [dataSource _collectionListBySection]) {
-			for(PHAssetCollection* assetNow in collectionNow.collections) {
-				spec = [PSSpecifier preferenceSpecifierNamed:assetNow.localizedTitle
-                                                  target:self
-											         set:@selector(setPreferenceValue:specifier:)
-											         get:@selector(readPreferenceValue:)
-                                                  detail:Nil
-											        cell:PSSwitchCell
-											        edit:Nil];
-				NSString* locIden = assetNow.localIdentifier;
-				if([assetNow.localizedTitle isEqualToString:@"PXPhotoKitCollectionsDataSourcePeopleTitle"]) {
-					locIden = @"PXPhotoKitCollectionsDataSourcePeopleTitle";
-				}
-				[spec setProperty:locIden forKey:@"key"];
-				[spec setProperty:@NO forKey:@"default"];
-				[specifiers addObject:spec];
-			}
-			spec = [PSSpecifier emptyGroupSpecifier];
+		for(NSString* keyNow in [knownAlbumDic() allKeys]) {
+			
+			spec = [PSSpecifier preferenceSpecifierNamed:[keyNow componentsSeparatedByString:@"|||"][1]
+													target:self
+												set:@selector(setPreferenceValue:specifier:)
+												get:@selector(readPreferenceValue:)
+													detail:Nil
+												cell:PSSwitchCell
+												edit:Nil];
+												
+			[spec setProperty:keyNow forKey:@"key"];
+			[spec setProperty:@NO forKey:@"default"];
 			[specifiers addObject:spec];
 		}
-		tmpDisable = NO;
 		
 		spec = [PSSpecifier emptyGroupSpecifier];
-        [spec setProperty:@"AlbumHider © 2018 julioverne" forKey:@"footerText"];
+        [spec setProperty:@"AlbumHider © 2020 julioverne" forKey:@"footerText"];
         [specifiers addObject:spec];
 		_specifiers = [specifiers copy];
 	}
@@ -198,8 +224,15 @@ static BOOL tmpDisable;
 	self.title = @"AlbumHider";
 	[UISwitch appearanceWhenContainedIn:self.class, nil].onTintColor = [UIColor colorWithRed:0.09 green:0.99 blue:0.99 alpha:1.0];
 	
+	UIBarButtonItem* kBTClose = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemStop target:self action:@selector(close)];
+	self.navigationItem.leftBarButtonItem = kBTClose;
+	
 	UIBarButtonItem *anotherButton = [[UIBarButtonItem alloc] initWithTitle:@"Apply (Exit)" style:UIBarButtonItemStylePlain target:self action:@selector(apply)];
 	self.navigationItem.rightBarButtonItem = anotherButton;
+}
+- (void)close
+{
+	[self dismissViewControllerAnimated:YES completion:nil];
 }
 - (void)apply
 {
